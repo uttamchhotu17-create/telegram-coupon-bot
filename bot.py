@@ -4,7 +4,8 @@ from telegram import *
 from telegram.ext import *
 
 TOKEN = "8271855633:AAEOQ0ymg-NFiXHhIu2QtNC3dL_cWtmTwxQ"
-ADMIN_ID = 7662708655  # apni Telegram numeric ID
+ADMIN_ID = 7662708655
+SUPPORT_USERNAME = "@Ark456781"
 
 # ---------------- DATABASE ---------------- #
 
@@ -28,16 +29,12 @@ cursor.execute("""CREATE TABLE IF NOT EXISTS orders(
     product TEXT,
     qty INTEGER,
     amount INTEGER,
-    utr TEXT,
+    proof TEXT,
     status TEXT
 )""")
 
 cursor.execute("""CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY
-)""")
-
-cursor.execute("""CREATE TABLE IF NOT EXISTS used_utrs(
-    utr TEXT PRIMARY KEY
 )""")
 
 conn.commit()
@@ -53,7 +50,6 @@ user_state = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     cursor.execute("INSERT OR IGNORE INTO users VALUES(?)",(user_id,))
     conn.commit()
 
@@ -62,21 +58,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ["📦 Add Product","➕ Add Stock"],
             ["💰 Set Price","📊 View Products"],
             ["🧾 Pending Orders","📈 Sales Report"],
-            ["👥 Users","📢 Broadcast"],
-            ["🖼 Change QR"]
+            ["👥 Users","📢 Broadcast"]
+        ]
+        await update.message.reply_text("👑 Admin Panel",
+            reply_markup=ReplyKeyboardMarkup(keyboard,resize_keyboard=True))
+    else:
+        keyboard = [
+            ["🛒 Buy Product"],
+            ["📜 My Orders","🔍 Check Order"],
+            ["📞 Support"]
         ]
         await update.message.reply_text(
-            "Admin Panel",
-            reply_markup=ReplyKeyboardMarkup(keyboard,resize_keyboard=True)
-        )
-    else:
-        keyboard = [["🛒 Buy Product"]]
-        await update.message.reply_text(
-            "⚠ Use at your own risk.\nInstant use only.\nNo replacement.",
+            "Welcome to Digital Store.\nSelect option:",
             reply_markup=ReplyKeyboardMarkup(keyboard,resize_keyboard=True)
         )
 
-# ---------------- BUY ---------------- #
+# ---------------- USER BUY ---------------- #
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT name FROM products")
@@ -84,21 +81,19 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [[InlineKeyboardButton(p[0],callback_data=f"buy_{p[0]}")] for p in products]
 
-    await update.message.reply_text(
-        "Select Product:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await update.message.reply_text("Select Product:",
+        reply_markup=InlineKeyboardMarkup(buttons))
 
 async def select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    product = query.data.split("_")[1]
+    product = query.data.replace("buy_","")
 
     cursor.execute("SELECT COUNT(*) FROM stock WHERE product=?",(product,))
-    stock_count = cursor.fetchone()[0]
+    stock = cursor.fetchone()[0]
 
-    if stock_count == 0:
+    if stock == 0:
         await query.message.reply_text("❌ Out of Stock")
         return
 
@@ -122,57 +117,49 @@ async def select_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    qty = int(query.data.split("_")[1])
+    qty = int(query.data.replace("qty_",""))
     user_id = query.from_user.id
 
     product = user_state[user_id]["product"]
     price = user_state[user_id]["price"]
-
     total = price * qty
     order_id = "ORD"+str(uuid.uuid4())[:8]
 
-    user_state[user_id]["qty"] = qty
-    user_state[user_id]["order_id"] = order_id
-    user_state[user_id]["total"] = total
+    user_state[user_id].update({
+        "qty":qty,
+        "order_id":order_id,
+        "total":total
+    })
 
     await query.message.reply_photo(
         photo=open("qr.jpg","rb"),
-        caption=f"Order ID: {order_id}\nPay ₹{total}\nSend UTR after payment",
+        caption=f"Order ID: {order_id}\nPay ₹{total}\nSend payment screenshot",
         reply_markup=ReplyKeyboardMarkup(
-            [["📨 Send UTR","❌ Cancel"]],
+            [["📤 Upload Payment Screenshot","❌ Cancel"]],
             resize_keyboard=True
         )
     )
 
-# ---------------- UTR ---------------- #
+# ---------------- PAYMENT PROOF ---------------- #
 
-async def ask_utr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_state[update.effective_user.id]["waiting_utr"] = True
-    await update.message.reply_text("Send your UTR number")
+async def ask_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_state[update.effective_user.id]["waiting_proof"] = True
+    await update.message.reply_text("Upload payment screenshot")
 
-async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text
 
     if user_id not in user_state:
         return
-
-    if "waiting_utr" not in user_state[user_id]:
+    if "waiting_proof" not in user_state[user_id]:
         return
 
-    cursor.execute("SELECT * FROM used_utrs WHERE utr=?",(text,))
-    if cursor.fetchone():
-        await update.message.reply_text("❌ Duplicate UTR")
-        return
-
-    cursor.execute("INSERT INTO used_utrs VALUES(?)",(text,))
-    conn.commit()
-
+    file_id = update.message.photo[-1].file_id
     order = user_state[user_id]
 
     cursor.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?)",
         (order["order_id"],user_id,order["product"],
-         order["qty"],order["total"],text,"pending"))
+         order["qty"],order["total"],file_id,"pending"))
     conn.commit()
 
     buttons = [[
@@ -182,22 +169,23 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"reject_{order['order_id']}")
     ]]
 
-    await context.bot.send_message(
+    await context.bot.send_photo(
         ADMIN_ID,
-        f"New Order\nOrder ID: {order['order_id']}\nUser: {user_id}\nUTR: {text}",
+        file_id,
+        caption=f"New Order\nOrder ID: {order['order_id']}\nUser: {user_id}",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-    await update.message.reply_text("Order submitted. Waiting for admin approval.")
+    await update.message.reply_text("Order submitted. Waiting approval.")
     user_state.pop(user_id)
 
-# ---------------- ADMIN APPROVE / REJECT ---------------- #
+# ---------------- ADMIN ACTION ---------------- #
 
 async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    action,order_id = query.data.split("_")
+    action, order_id = query.data.split("_",1)
 
     cursor.execute("SELECT * FROM orders WHERE order_id=?",(order_id,))
     order = cursor.fetchone()
@@ -222,19 +210,37 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("UPDATE orders SET status='approved' WHERE order_id=?",(order_id,))
         conn.commit()
 
-        await context.bot.send_message(
-            user_id,
-            "✅ Payment Approved\nYour Codes:\n"+ "\n".join(codes)
-        )
+        await context.bot.send_message(user_id,
+            "✅ Payment Approved\nYour Codes:\n"+ "\n".join(codes))
 
-        await query.message.edit_text("Order Approved")
+        await query.message.edit_caption("Order Approved")
 
     else:
         cursor.execute("UPDATE orders SET status='rejected' WHERE order_id=?",(order_id,))
         conn.commit()
 
         await context.bot.send_message(order[1],"❌ Payment Rejected")
-        await query.message.edit_text("Order Rejected")
+        await query.message.edit_caption("Order Rejected")
+
+# ---------------- USER EXTRA ---------------- #
+
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("SELECT order_id,product,qty,amount,status FROM orders WHERE user_id=?",(user_id,))
+    orders = cursor.fetchall()
+
+    if not orders:
+        await update.message.reply_text("No orders found.")
+        return
+
+    msg = ""
+    for o in orders:
+        msg += f"Order: {o[0]}\nProduct: {o[1]}\nQty: {o[2]}\nAmount: ₹{o[3]}\nStatus: {o[4]}\n\n"
+
+    await update.message.reply_text(msg)
+
+async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"https://t.me/{SUPPORT_USERNAME}")
 
 # ---------------- MAIN ---------------- #
 
@@ -242,10 +248,12 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start",start))
 app.add_handler(MessageHandler(filters.Text("🛒 Buy Product"),buy))
-app.add_handler(CallbackQueryHandler(select_product,pattern="buy_"))
-app.add_handler(CallbackQueryHandler(select_qty,pattern="qty_"))
-app.add_handler(MessageHandler(filters.Text("📨 Send UTR"),ask_utr))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,receive_text))
-app.add_handler(CallbackQueryHandler(admin_action,pattern="approve_|reject_"))
+app.add_handler(CallbackQueryHandler(select_product,pattern="^buy_"))
+app.add_handler(CallbackQueryHandler(select_qty,pattern="^qty_"))
+app.add_handler(MessageHandler(filters.Text("📤 Upload Payment Screenshot"),ask_proof))
+app.add_handler(MessageHandler(filters.PHOTO,receive_photo))
+app.add_handler(CallbackQueryHandler(admin_action,pattern="^(approve_|reject_)"))
+app.add_handler(MessageHandler(filters.Text("📜 My Orders"),my_orders))
+app.add_handler(MessageHandler(filters.Text("📞 Support"),support))
 
 app.run_polling()
